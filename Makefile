@@ -217,7 +217,8 @@ OBJS_c := \
     src/server/world.o      \
     src/speedrun/timer.o    \
     src/speedrun/timer_helper.o \
-    src/speedrun/strafe_helper/strafe_helper.o
+    src/speedrun/strafe_helper/strafe_helper.o \
+    src/speedrun/strafe_helper_customization.o
 
 OBJS_s := \
     $(COMMON_OBJS)  \
