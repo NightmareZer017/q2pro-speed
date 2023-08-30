@@ -622,6 +622,26 @@ static void CL_ParseServerData(void)
         cl.pmp.flyfriction = 4;
     }
 
+    if (cls.demo.playback) {
+        // Original demos just use default protocol version. For the extended
+        // demo format that allows prediction, that's basically still the same.
+        // However, we use these protocol flags to get information about
+        // movement mods that were used during demo recording (like the QW mod),
+        // as we need to know those for accurate prediction.
+        // So after reading those special protocol extension flags, we now reset
+        // the protocol info here to parse the following old protocol messages
+        // correctly.
+        // An exception is the longsolid extension however. When playing with
+        // it, recording the demo in the short format will not retain the info
+        // necessary for accurate prediction. Collision boxes would be messed
+        // up. So this extension we actually have to support during both demo
+        // recording and playback. Hence why we keep that extension if it was
+        // set.
+        cls.serverProtocol = PROTOCOL_VERSION_DEFAULT;
+        cls.protocolVersion = 0;
+        cl.esFlags &= MSG_ES_LONGSOLID;
+    }
+
     if (cl.clientNum == -1) {
         SCR_PlayCinematic(levelname);
     } else {

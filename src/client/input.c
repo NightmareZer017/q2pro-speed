@@ -616,6 +616,10 @@ void CL_UpdateCmd(int msec)
         return;
     }
 
+    if (cls.demo.playback && cls.demo.playback_type == 2) {
+        return;
+    }
+
     // add to milliseconds of time to apply the move
     cl.cmd.msec += msec;
 
@@ -762,6 +766,10 @@ void CL_FinalizeCmd(void)
         return;
     }
 
+    if (cls.demo.playback) {
+        return;
+    }
+
 //
 // figure button bits
 //
@@ -824,6 +832,9 @@ void CL_FinalizeCmd(void)
     // save this command off for prediction
     cl.cmdNumber++;
     cl.cmds[cl.cmdNumber & CMD_MASK] = cl.cmd;
+    if (cls.demo.recording && cls.demo.recording_type == 2) {
+        CL_WriteDemoCmd();
+    }
 
     // clear pending cmd
     memset(&cl.cmd, 0, sizeof(cl.cmd));

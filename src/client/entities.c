@@ -399,7 +399,7 @@ void CL_DeltaFrame(void)
     else
         CL_GTV_EmitFrame();
 
-    if (cls.demo.playback) {
+    if (cls.demo.playback && cls.demo.playback_type != DEM_PREDICTION_EXTENSION) {
         // this delta has nothing to do with local viewangles,
         // clear it to avoid interfering with demo freelook hack
         VectorClear(cl.frame.ps.pmove.delta_angles);
@@ -1161,7 +1161,8 @@ void CL_CalcViewValues(void)
     lerp = cl.lerpfrac;
 
     // calculate the origin
-    if (!cls.demo.playback && cl_predict->integer && !(ps->pmove.pm_flags & PMF_NO_PREDICTION)) {
+    if (!(cls.demo.playback && cls.demo.playback_type != DEM_PREDICTION_EXTENSION) &&
+        cl_predict->integer && !(ps->pmove.pm_flags & PMF_NO_PREDICTION)) {
         // use predicted values
         unsigned delta = cls.realtime - cl.predicted_step_time;
         float backlerp = lerp - 1.0f;
@@ -1186,7 +1187,7 @@ void CL_CalcViewValues(void)
     }
 
     // if not running a demo or on a locked frame, add the local angle movement
-    if (cls.demo.playback) {
+    if (cls.demo.playback && cls.demo.playback_type != DEM_PREDICTION_EXTENSION) {
         if (cls.key_dest == KEY_GAME && Key_IsDown(K_SHIFT)) {
             VectorCopy(cl.viewangles, cl.refdef.viewangles);
         } else {

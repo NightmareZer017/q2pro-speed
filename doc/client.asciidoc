@@ -939,6 +939,11 @@ cl_demowait::
     Specifies if demo playback is automatically paused at the last frame in
     demo file. Default value is 0 (finish playback).
 
+cl_demoformat::
+    Specifies format for recording demos.
+        - 0 — original vanilla Quake II format
+        - 2 — extension for demos with prediction
+
 cl_autopause::
     Specifies if single player game or demo playback is automatically paused
     once client console or menu is opened. Default value is 1 (pause game).

@@ -30,7 +30,7 @@ void CL_CheckPredictionError(void)
     unsigned    cmd;
     int         len;
 
-    if (!cls.netchan) {
+    if (!cls.netchan && !(cls.demo.playback && cls.demo.playback_type == DEM_PREDICTION_EXTENSION)) {
         return;
     }
 
@@ -43,7 +43,9 @@ void CL_CheckPredictionError(void)
         return;
 
     // calculate the last usercmd_t we sent that the server has processed
-    frame = cls.netchan->incoming_acknowledged & CMD_MASK;
+    const int incoming_acknowledged = cls.demo.playback ?
+        cls.demo.incoming_acknowledged : cls.netchan->incoming_acknowledged;
+    frame = incoming_acknowledged & CMD_MASK;
     cmd = cl.history[frame].cmdNumber;
 
     // compare what the server returned with what we had predicted it to be
@@ -181,7 +183,7 @@ void CL_PredictMovement(void)
         return;
     }
 
-    if (cls.demo.playback) {
+    if (cls.demo.playback && cls.demo.playback_type != DEM_PREDICTION_EXTENSION) {
         return;
     }
 
@@ -195,7 +197,9 @@ void CL_PredictMovement(void)
         return;
     }
 
-    ack = cl.history[cls.netchan->incoming_acknowledged & CMD_MASK].cmdNumber;
+    const int incoming_acknowledged = cls.demo.playback ?
+        cls.demo.incoming_acknowledged : cls.netchan->incoming_acknowledged;
+    ack = cl.history[incoming_acknowledged & CMD_MASK].cmdNumber;
     current = cl.cmdNumber;
 
     // if we are too far out of date, just freeze
@@ -231,9 +235,11 @@ void CL_PredictMovement(void)
     // run pending cmd
     if (cl.cmd.msec) {
         pm.cmd = cl.cmd;
-        pm.cmd.forwardmove = cl.localmove[0];
-        pm.cmd.sidemove = cl.localmove[1];
-        pm.cmd.upmove = cl.localmove[2];
+        if (!cls.demo.playback) {
+            pm.cmd.forwardmove = cl.localmove[0];
+            pm.cmd.sidemove = cl.localmove[1];
+            pm.cmd.upmove = cl.localmove[2];
+        }
         Pmove(&pm, &cl.pmp);
         frame = current;
 

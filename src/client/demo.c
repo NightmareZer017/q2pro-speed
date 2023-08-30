@@ -27,6 +27,16 @@ static byte     demo_buffer[MAX_PACKETLEN];
 static cvar_t   *cl_demosnaps;
 static cvar_t   *cl_demomsglen;
 static cvar_t   *cl_demowait;
+static cvar_t   *cl_demoformat;
+
+static usercmd_t demo_next_cmd;
+static int demo_next_cmd_time;
+static int demo_outgoing_sequence;
+
+enum {
+    dem_usercmd,
+    dem_server_message
+} demoMessageType_t;
 
 // =========================================================================
 
@@ -52,6 +62,27 @@ bool CL_WriteDemoMessage(sizebuf_t *buf)
     if (!buf->cursize)
         return true;
 
+    if (cls.demo.recording_type == DEM_PREDICTION_EXTENSION) {
+        const byte message_type = dem_server_message;
+        FS_Write(&message_type, sizeof(message_type), cls.demo.recording);
+
+        // extra info for prediction extension: the number of the command that
+        // the server has acknowledged already, so that we know which commands
+        // to include in the prediction
+        const int ack = cls.netchan->incoming_acknowledged;
+        const unsigned cmd_acknowledged = cl.history[ack & CMD_MASK].cmdNumber;
+        FS_Write(&cmd_acknowledged, sizeof(cmd_acknowledged), cls.demo.recording);
+
+        // extra info for prediction extension: how long has the current cmd
+        // (that has not been saved yet) been cooked for? We need this to time
+        // the prediction correctly with respect to the server frames.
+        // Theoretically it might be enough to send this only once at the start,
+        // but one byte should not hurt and will make sure that we are always
+        // synced up.
+        const byte current_msec = cl.cmd.msec;
+        FS_Write(&current_msec, sizeof(current_msec), cls.demo.recording);
+    }
+
     msglen = LittleLong(buf->cursize);
     ret = FS_Write(&msglen, 4, cls.demo.recording);
     if (ret != 4)
@@ -70,6 +101,34 @@ fail:
     Com_EPrintf("Couldn't write demo: %s\n", Q_ErrorString(ret));
     CL_Stop_f();
     return false;
+}
+
+/*
+====================
+CL_WriteDemoCmd
+====================
+*/
+bool CL_WriteDemoCmd(void)
+{
+    int		i;
+    usercmd_t cmd;
+
+    const byte message_type = dem_usercmd;
+    FS_Write(&message_type, sizeof(message_type), cls.demo.recording);
+
+    unsigned cmd_number = LittleLong(cl.cmdNumber);
+    FS_Write(&cmd_number, sizeof(cmd_number), cls.demo.recording);
+
+    cmd = cl.cmd;
+    for (i = 0; i < 3; i++)
+        cmd.angles[i] = LittleShort(cmd.angles[i]);
+    cmd.forwardmove = LittleShort(cmd.forwardmove);
+    cmd.sidemove    = LittleShort(cmd.sidemove);
+    cmd.upmove      = LittleShort(cmd.upmove);
+
+    FS_Write(&cmd, sizeof(cmd), cls.demo.recording);
+
+    return true;
 }
 
 // writes a delta update of an entity_state_t list to the message.
@@ -114,8 +173,11 @@ static void emit_packet_entities(server_frame_t *from, server_frame_t *to)
             // of packet loss.
             MSG_PackEntity(&oldpack, oldent, false);
             MSG_PackEntity(&newpack, newent, false);
-            MSG_WriteDeltaEntity(&oldpack, &newpack,
-                                 newent->number <= cl.maxclients ? MSG_ES_NEWENTITY : 0);
+            msgEsFlags_t flags = newent->number <= cl.maxclients ? MSG_ES_NEWENTITY : 0;
+            if (cls.demo.recording_type == DEM_PREDICTION_EXTENSION) {
+                flags |= cl.esFlags & MSG_ES_LONGSOLID;
+            }
+            MSG_WriteDeltaEntity(&oldpack, &newpack, flags);
             oldindex++;
             newindex++;
             continue;
@@ -125,7 +187,11 @@ static void emit_packet_entities(server_frame_t *from, server_frame_t *to)
             // this is a new entity, send it from the baseline
             MSG_PackEntity(&oldpack, &cl.baselines[newnum], false);
             MSG_PackEntity(&newpack, newent, false);
-            MSG_WriteDeltaEntity(&oldpack, &newpack, MSG_ES_FORCE | MSG_ES_NEWENTITY);
+            msgEsFlags_t flags = MSG_ES_FORCE | MSG_ES_NEWENTITY;
+            if (cls.demo.recording_type == DEM_PREDICTION_EXTENSION) {
+                flags |= cl.esFlags & MSG_ES_LONGSOLID;
+            }
+            MSG_WriteDeltaEntity(&oldpack, &newpack, flags);
             newindex++;
             continue;
         }
@@ -133,7 +199,11 @@ static void emit_packet_entities(server_frame_t *from, server_frame_t *to)
         if (newnum > oldnum) {
             // the old entity isn't present in the new message
             MSG_PackEntity(&oldpack, oldent, false);
-            MSG_WriteDeltaEntity(&oldpack, NULL, MSG_ES_FORCE);
+            msgEsFlags_t flags = MSG_ES_FORCE;
+            if (cls.demo.recording_type == DEM_PREDICTION_EXTENSION) {
+                flags |= cl.esFlags & MSG_ES_LONGSOLID;
+            }
+            MSG_WriteDeltaEntity(&oldpack, NULL, flags);
             oldindex++;
             continue;
         }
@@ -276,6 +346,16 @@ void CL_Stop_f(void)
     }
 
 // finish up
+    if (cls.demo.recording_type == DEM_PREDICTION_EXTENSION) {
+        const byte message_type = dem_server_message;
+        FS_Write(&message_type, sizeof(message_type), cls.demo.recording);
+
+        const unsigned cmd_acknowledged = 0;
+        FS_Write(&cmd_acknowledged, sizeof(cmd_acknowledged), cls.demo.recording);
+
+        const byte current_msec = 0;
+        FS_Write(&current_msec, sizeof(current_msec), cls.demo.recording);
+    }
     msglen = (uint32_t)-1;
     FS_Write(&msglen, 4, cls.demo.recording);
 
@@ -395,14 +475,48 @@ static void CL_Record_f(void)
     // write out messages to hold the startup information
     //
 
+    if (cl_demoformat->integer > 0) {
+        uint32_t magic = LittleLong(DM2X_MAGIC);
+        FS_Write(&magic, sizeof(magic), cls.demo.recording);
+        cls.demo.recording_type = DEM_PREDICTION_EXTENSION;
+    }
+
     // send the serverdata
     MSG_WriteByte(svc_serverdata);
-    MSG_WriteLong(PROTOCOL_VERSION_DEFAULT);
+    if (cls.demo.recording_type == DEM_PREDICTION_EXTENSION) {
+        MSG_WriteLong(cls.serverProtocol);
+    } else {
+        MSG_WriteLong(PROTOCOL_VERSION_DEFAULT);
+    }
     MSG_WriteLong(0x10000 + cl.servercount);
     MSG_WriteByte(1);      // demos are always attract loops
     MSG_WriteString(cl.gamedir);
     MSG_WriteShort(cl.clientNum);
     MSG_WriteString(cl.configstrings[CS_NAME]);
+
+    if (cls.demo.recording_type == DEM_PREDICTION_EXTENSION) {
+        // send protocol specific stuff. we only really do this to store special
+        // physics mods in the demo (e.g. QW mode) for accurate prediction
+        switch (cls.serverProtocol) {
+        case PROTOCOL_VERSION_R1Q2:
+            MSG_WriteByte(0);   // not enhanced
+            MSG_WriteShort(cls.protocolVersion);
+            MSG_WriteByte(0);   // no advanced deltas
+            MSG_WriteByte(cl.pmp.strafehack);
+            break;
+        case PROTOCOL_VERSION_Q2PRO:
+            MSG_WriteShort(cls.protocolVersion);
+            MSG_WriteByte(cl.serverstate);
+            MSG_WriteByte(cl.pmp.strafehack);
+            MSG_WriteByte(cl.pmp.qwmode);
+            if (cls.protocolVersion >= PROTOCOL_VERSION_Q2PRO_WATERJUMP_HACK) {
+                MSG_WriteByte(cl.pmp.waterhack);
+            }
+            break;
+        default:
+            break;
+        }
+    }
 
     // configstrings
     for (i = 0; i < MAX_CONFIGSTRINGS; i++) {
@@ -438,7 +552,11 @@ static void CL_Record_f(void)
 
         MSG_WriteByte(svc_spawnbaseline);
         MSG_PackEntity(&pack, ent, false);
-        MSG_WriteDeltaEntity(NULL, &pack, MSG_ES_FORCE);
+        msgEsFlags_t flags = MSG_ES_FORCE;
+        if (cls.demo.recording_type == DEM_PREDICTION_EXTENSION) {
+            flags |= cl.esFlags & MSG_ES_LONGSOLID;
+        }
+        MSG_WriteDeltaEntity(NULL, &pack, flags);
     }
 
     MSG_WriteByte(svc_stufftext);
@@ -524,6 +642,32 @@ static void CL_Suspend_f(void)
     memset(cl.dcs, 0, sizeof(cl.dcs));
 }
 
+static int read_demo_server_message_prediction_extension(
+    qhandle_t f, unsigned *cmd_acknowledged_out, byte *current_msec_out)
+{
+    int read;
+    unsigned cmd_acknowledged;
+    byte current_msec;
+
+    read = FS_Read(&cmd_acknowledged, sizeof(cmd_acknowledged), f);
+    if (read != sizeof(cmd_acknowledged)) {
+        return Q_ERR_UNEXPECTED_EOF;
+    }
+    if (cmd_acknowledged_out) {
+        *cmd_acknowledged_out = LittleLong(cmd_acknowledged);
+    }
+
+    read = FS_Read(&current_msec, sizeof(current_msec), f);
+    if (read != sizeof(current_msec)) {
+        return Q_ERR_UNEXPECTED_EOF;
+    }
+    if (current_msec_out) {
+        *current_msec_out = current_msec;
+    }
+
+    return 0;
+}
+
 static int read_first_message(qhandle_t f)
 {
     uint32_t    ul;
@@ -547,13 +691,39 @@ static int read_first_message(qhandle_t f)
             return Q_ERR_UNEXPECTED_EOF;
         }
         msglen = LittleShort(us);
-        type = 1;
+        type = DEM_MVD;
     } else {
+        if (ul == DM2X_MAGIC) {
+            byte c;
+            read = FS_Read(&c, sizeof(c), f);
+            if (read != sizeof(c)) {
+                return read < 0 ? read : Q_ERR_UNEXPECTED_EOF;
+            }
+            if (c != dem_server_message) {
+                return Q_ERR_INVALID_FORMAT;
+            }
+
+            const int error = read_demo_server_message_prediction_extension(f, NULL, NULL);
+            if (error) {
+                return error;
+            }
+
+            cls.demo.incoming_acknowledged = 0;
+            demo_outgoing_sequence = 0;
+            memset(cl.history, 0, sizeof(cl.history));
+
+            read = FS_Read(&ul, 4, f);
+            if (read != 4) {
+                return read < 0 ? read : Q_ERR_UNEXPECTED_EOF;
+            }
+            type = DEM_PREDICTION_EXTENSION;
+        } else {
+            type = DEM_VANILLA;
+        }
         if (ul == (uint32_t)-1) {
             return Q_ERR_UNEXPECTED_EOF;
         }
         msglen = LittleLong(ul);
-        type = 0;
     }
 
     if (msglen < 64 || msglen > sizeof(msg_read_buffer)) {
@@ -572,7 +742,7 @@ static int read_first_message(qhandle_t f)
     return type;
 }
 
-static int read_next_message(qhandle_t f)
+static int read_demo_server_message(qhandle_t f)
 {
     uint32_t msglen;
     int read;
@@ -603,6 +773,139 @@ static int read_next_message(qhandle_t f)
     }
 
     return 1;
+}
+
+static int read_demo_cmd(qhandle_t f, unsigned *cmd_number_out, usercmd_t *cmd_out)
+{
+    int read;
+    unsigned cmd_number;
+    usercmd_t cmd;
+
+    read = FS_Read(&cmd_number, sizeof(cmd_number), f);
+    if (read != sizeof(cmd_number)) {
+        return Q_ERR_UNEXPECTED_EOF;
+    }
+    if (cmd_number_out) {
+        *cmd_number_out = LittleLong(cmd_number);
+    }
+
+    read = FS_Read(&cmd, sizeof(cmd), f);
+    if (read != sizeof(cmd)) {
+        return Q_ERR_INVALID_FORMAT;
+    }
+    for (int j = 0; j < 3; j++)
+        cmd.angles[j] = LittleShort(cmd.angles[j]);
+    cmd.forwardmove = LittleShort(cmd.forwardmove);
+    cmd.sidemove    = LittleShort(cmd.sidemove);
+    cmd.upmove      = LittleShort(cmd.upmove);
+    if (cmd_out) {
+        *cmd_out = cmd;
+    }
+
+    return 0;
+}
+
+static int read_next_cmd(qhandle_t f, usercmd_t* next_cmd_out, int* next_cmd_time_out)
+{
+    byte c;
+    int read;
+    int status;
+
+    while (true) {
+        read = FS_Read(&c, sizeof(c), f);
+        if (read != sizeof(c)) {
+            return read < 0 ? read : Q_ERR_UNEXPECTED_EOF;
+        }
+
+        if (c == dem_server_message) {
+            byte current_msec;
+            status = read_demo_server_message_prediction_extension(f, NULL, &current_msec);
+            if (status) {
+                return status;
+            }
+
+            status = read_demo_server_message(f);
+            if (status <= 0) {
+                return status;
+            }
+            *next_cmd_time_out = cl.servertime - current_msec;
+
+        } else if (c == dem_usercmd) {
+            status = read_demo_cmd(f, NULL, next_cmd_out);
+            if (status) {
+                return status;
+            }
+            return 0;
+
+        } else {
+            return Q_ERR_INVALID_FORMAT;
+        }
+    }
+}
+
+static const int status_no_server_message = 42;
+static int read_next_message(qhandle_t f, demoType_t demo_type)
+{
+    int error;
+    int read;
+    byte c = dem_server_message;
+
+    if (demo_type == DEM_PREDICTION_EXTENSION) {
+        read = FS_Read(&c, sizeof(c), f);
+        if (read != sizeof(c)) {
+            return read < 0 ? read : Q_ERR_UNEXPECTED_EOF;
+        }
+
+        if (c == dem_server_message) {
+            unsigned cmd_acknowledged;
+            const int error = read_demo_server_message_prediction_extension(f, &cmd_acknowledged, NULL);
+            if (error) {
+                return error;
+            }
+
+            // look for the cmd number that the server acknowledged in the cmd
+            // history and set the incoming_acknowledged index to it, such that
+            // prediction starts correctly after that cmd
+            for (int i = 1; i <= CMD_BACKUP; ++i) {
+                const int new_incoming_ack = cls.demo.incoming_acknowledged + i;
+                if (cl.history[new_incoming_ack & CMD_MASK].cmdNumber == cmd_acknowledged) {
+                    cls.demo.incoming_acknowledged = new_incoming_ack;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (c == dem_server_message) {
+        return read_demo_server_message(f);
+
+    } else if (c == dem_usercmd) {
+        usercmd_t cmd;
+        error = read_demo_cmd(f, &cl.cmdNumber, &cmd);
+        if (error) {
+            return error;
+        }
+
+        cl.cmds[cl.cmdNumber & CMD_MASK] = cmd;
+        cl.history[demo_outgoing_sequence & CMD_MASK].cmdNumber = cl.cmdNumber;
+        demo_outgoing_sequence += 1;
+
+        const int msec_late = cl.time - demo_next_cmd_time;
+        // peek ahead for the next cmd so we can smoothly interpolate towards it
+        const uint64_t filepos = FS_Tell(cls.demo.playback);
+        error = read_next_cmd(cls.demo.playback, &demo_next_cmd, &demo_next_cmd_time);
+        if (error) {
+            return error;
+        }
+        FS_Seek(cls.demo.playback, filepos);
+        demo_next_cmd_time += demo_next_cmd.msec;
+        cl.cmd = demo_next_cmd;
+        cl.cmd.msec = msec_late;
+
+        return status_no_server_message;
+    }
+
+    return Q_ERR_INVALID_FORMAT;
 }
 
 static void finish_demo(int ret)
@@ -642,7 +945,7 @@ static int parse_next_message(int wait)
 {
     int ret;
 
-    ret = read_next_message(cls.demo.playback);
+    ret = read_next_message(cls.demo.playback, cls.demo.playback_type);
     if (ret < 0 || (ret == 0 && wait == 0)) {
         finish_demo(ret);
         return -1;
@@ -653,6 +956,10 @@ static int parse_next_message(int wait)
     if (ret == 0) {
         cls.demo.eof = true;
         return -1;
+    }
+
+    if (ret == status_no_server_message) {
+        return 0;
     }
 
     CL_ParseServerMessage();
@@ -700,7 +1007,7 @@ static void CL_PlayDemo_f(void)
         return;
     }
 
-    if (type == 1) {
+    if (type == DEM_MVD) {
 #if USE_MVD_CLIENT
         Cbuf_InsertText(&cmd_buffer, va("mvdplay --replace @@ \"/%s\"\n", name));
 #else
@@ -716,6 +1023,8 @@ static void CL_PlayDemo_f(void)
     CL_Disconnect(ERR_RECONNECT);
 
     cls.demo.playback = f;
+    cls.demo.playback_type = type;
+    demo_next_cmd_time = INT_MAX;
     cls.state = ca_connected;
     Q_strlcpy(cls.servername, COM_SkipPath(name), sizeof(cls.servername));
     cls.serverAddress.type = NA_LOOPBACK;
@@ -992,7 +1301,7 @@ static void CL_Seek_f(void)
 
     // skip forward to destination frame
     while (cls.demo.frames_read < dest) {
-        ret = read_next_message(cls.demo.playback);
+        ret = read_next_message(cls.demo.playback, cls.demo.playback_type);
         if (ret == 0 && cl_demowait->integer) {
             cls.demo.eof = true;
             break;
@@ -1091,11 +1400,12 @@ demoInfo_t *CL_GetDemoInfo(const char *path, demoInfo_t *info)
         goto fail;
     }
 
-    if (type == 0) {
+    if (type == DEM_VANILLA || type == DEM_PREDICTION_EXTENSION) {
         if (MSG_ReadByte() != svc_serverdata) {
             goto fail;
         }
-        if (MSG_ReadLong() != PROTOCOL_VERSION_DEFAULT) {
+        const int serverProtocol = MSG_ReadLong();
+        if (serverProtocol != PROTOCOL_VERSION_DEFAULT && type == DEM_VANILLA) {
             goto fail;
         }
         MSG_ReadLong();
@@ -1104,10 +1414,25 @@ demoInfo_t *CL_GetDemoInfo(const char *path, demoInfo_t *info)
         clientNum = MSG_ReadShort();
         MSG_ReadString(NULL, 0);
 
+        if (serverProtocol == PROTOCOL_VERSION_R1Q2) {
+            MSG_ReadByte();
+            MSG_ReadShort();
+            MSG_ReadByte();
+            MSG_ReadByte();
+        } else if (serverProtocol == PROTOCOL_VERSION_Q2PRO) {
+            const int protocolVersion = MSG_ReadShort();
+            MSG_ReadByte();
+            MSG_ReadByte();
+            MSG_ReadByte();
+            if (protocolVersion >= PROTOCOL_VERSION_Q2PRO_WATERJUMP_HACK) {
+                MSG_ReadByte();
+            }
+        }
+
         while (1) {
             c = MSG_ReadByte();
             if (c == -1) {
-                if (read_next_message(f) <= 0) {
+                if (read_next_message(f, type) <= 0) {
                     break;
                 }
                 continue; // parse new message
@@ -1231,13 +1556,28 @@ void CL_DemoFrame(int msec)
         return;
     }
 
+    // For the prediction extension: count up the next cmd to smoothly use
+    // more and more of it in prediction
+    cl.cmd.msec += msec;
+
     // cl.time has already been advanced for this client frame
     // read the next frame to start lerp cycle again
-    while (cl.servertime < cl.time) {
+    while (cl.servertime < cl.time || demo_next_cmd_time <= cl.time) {
         if (parse_next_message(cl_demowait->integer))
             break;
         if (cls.state != ca_active)
             break;
+    }
+
+    // For the prediction extension: The angle of the current cl.cmd is applied
+    // immediately in the prediction code. So to make it smooth, we interpolate
+    // between the previous cmd already stored in cl.cmds and the upcoming one
+    // in demo_next_cmd.
+    for (int i = 0; i < 3; ++i) {
+        const double frac = (1.0 * cl.cmd.msec) / demo_next_cmd.msec;
+        double old = SHORT2ANGLE(cl.cmds[cl.cmdNumber & CMD_MASK].angles[i]);
+        double new = SHORT2ANGLE(demo_next_cmd.angles[i]);
+        cl.cmd.angles[i] = ANGLE2SHORT(LerpAngle(old, new, frac));
     }
 }
 
@@ -1261,6 +1601,7 @@ void CL_InitDemos(void)
     cl_demosnaps = Cvar_Get("cl_demosnaps", "10", 0);
     cl_demomsglen = Cvar_Get("cl_demomsglen", va("%d", MAX_PACKETLEN_WRITABLE_DEFAULT), 0);
     cl_demowait = Cvar_Get("cl_demowait", "0", 0);
+    cl_demoformat = Cvar_Get("cl_demoformat", "2", 0);
 
     Cmd_Register(c_demo);
     List_Init(&cls.demo.snapshots);

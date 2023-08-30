@@ -342,6 +342,12 @@ typedef struct {
     char        path[1];
 } dlqueue_t;
 
+typedef enum {
+    DEM_VANILLA,
+    DEM_MVD,
+    DEM_PREDICTION_EXTENSION
+} demoType_t;
+
 typedef struct client_static_s {
     connstate_t state;
     keydest_t   key_dest;
@@ -439,6 +445,9 @@ typedef struct client_static_s {
         bool        paused;
         bool        seeking;
         bool        eof;
+        demoType_t  recording_type;
+        demoType_t  playback_type;
+        int         incoming_acknowledged;  // for prediction during demo playback
     } demo;
 
 #if USE_CLIENT_GTV
@@ -846,6 +855,7 @@ void CL_InitDemos(void);
 void CL_CleanupDemos(void);
 void CL_DemoFrame(int msec);
 bool CL_WriteDemoMessage(sizebuf_t *buf);
+bool CL_WriteDemoCmd(void);
 void CL_EmitDemoFrame(void);
 void CL_EmitDemoSnapshot(void);
 void CL_FirstDemoFrame(void);

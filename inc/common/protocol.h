@@ -98,6 +98,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define CS_BITMAP_LONGS         (CS_BITMAP_BYTES / 4)
 
 #define MVD_MAGIC               MakeRawLong('M','V','D','2')
+#define DM2X_MAGIC              MakeRawLong('D','M','2','X')  // extension for demo prediction
 
 //
 // server to client

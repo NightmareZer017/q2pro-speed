@@ -2226,8 +2226,8 @@ static size_t CL_Ups_m(char *buffer, size_t size)
         return 0;
     }
 
-    if (!cls.demo.playback && cl.frame.clientNum == cl.clientNum &&
-        cl_predict->integer) {
+    if (!(cls.demo.playback && cls.demo.playback_type != DEM_PREDICTION_EXTENSION) &&
+        cl.frame.clientNum == cl.clientNum && cl_predict->integer) {
         VectorCopy(cl.predicted_velocity, vel);
     } else {
         VectorScale(cl.frame.ps.pmove.velocity, 0.125f, vel);
