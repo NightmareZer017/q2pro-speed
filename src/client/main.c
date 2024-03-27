@@ -2760,7 +2760,7 @@ static void CL_InitLocal(void)
     rcon_address = Cvar_Get("rcon_address", "", CVAR_PRIVATE);
     rcon_address->generator = Com_Address_g;
 
-    cl_thirdperson = Cvar_Get("cl_thirdperson", "0", CVAR_CHEAT);
+    cl_thirdperson = Cvar_Get("cl_thirdperson", "0", CVAR_ARCHIVE);
     cl_thirdperson_angle = Cvar_Get("cl_thirdperson_angle", "0", 0);
     cl_thirdperson_range = Cvar_Get("cl_thirdperson_range", "60", 0);
 
